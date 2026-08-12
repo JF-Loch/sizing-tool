@@ -1,0 +1,306 @@
+{
+  "heating": {
+    "86": [
+      {
+        "od": -4,
+        "capacity": 39240
+      },
+      {
+        "od": 5,
+        "capacity": 40946
+      },
+      {
+        "od": 18,
+        "capacity": 40754.23309277436
+      },
+      {
+        "od": 36,
+        "capacity": 38016.7213072
+      },
+      {
+        "od": 45,
+        "capacity": 42298.55645443105
+      },
+      {
+        "od": 77,
+        "capacity": 40733.24591532955
+      }
+    ],
+    "95": [
+      {
+        "od": -4,
+        "capacity": 38898
+      },
+      {
+        "od": 5,
+        "capacity": 40946
+      },
+      {
+        "od": 18,
+        "capacity": 40946
+      },
+      {
+        "od": 36,
+        "capacity": 40946
+      },
+      {
+        "od": 45,
+        "capacity": 40946
+      },
+      {
+        "od": 77,
+        "capacity": 38898
+      }
+    ],
+    "105": [
+      {
+        "od": -4,
+        "capacity": 38557
+      },
+      {
+        "od": 5,
+        "capacity": 40946
+      },
+      {
+        "od": 18,
+        "capacity": 40945.704
+      },
+      {
+        "od": 36,
+        "capacity": 40945.704
+      },
+      {
+        "od": 45,
+        "capacity": 40945.704
+      },
+      {
+        "od": 77,
+        "capacity": 36879.338888705315
+      }
+    ],
+    "120": [
+      {
+        "od": -4,
+        "capacity": 34804
+      },
+      {
+        "od": 5,
+        "capacity": 35486
+      },
+      {
+        "od": 18,
+        "capacity": 36168.7052
+      },
+      {
+        "od": 36,
+        "capacity": 39194.05762767659
+      },
+      {
+        "od": 45,
+        "capacity": 40945.704
+      },
+      {
+        "od": 77,
+        "capacity": 36059.516656
+      }
+    ],
+    "140": [
+      {
+        "od": -4,
+        "capacity": 0
+      },
+      {
+        "od": 5,
+        "capacity": 26921.800379999997
+      },
+      {
+        "od": 18,
+        "capacity": 29003.207
+      },
+      {
+        "od": 36,
+        "capacity": 38324.6671227
+      },
+      {
+        "od": 45,
+        "capacity": 40945.704
+      },
+      {
+        "od": 77,
+        "capacity": 35356.615404
+      }
+    ]
+  },
+  "cooling": {
+    "44": [
+      {
+        "od": 61,
+        "capacity": 37713
+      },
+      {
+        "od": 77,
+        "capacity": 39628
+      },
+      {
+        "od": 95,
+        "capacity": 34804
+      },
+      {
+        "od": 110,
+        "capacity": 21670
+      }
+    ],
+    "57": [
+      {
+        "od": 61,
+        "capacity": 46324
+      },
+      {
+        "od": 77,
+        "capacity": 47252
+      },
+      {
+        "od": 95,
+        "capacity": 40435
+      },
+      {
+        "od": 110,
+        "capacity": 26416
+      }
+    ],
+    "64": [
+      {
+        "od": 61,
+        "capacity": 43396
+      },
+      {
+        "od": 77,
+        "capacity": 42994
+      },
+      {
+        "od": 95,
+        "capacity": 36707
+      },
+      {
+        "od": 110,
+        "capacity": 24581
+      }
+    ]
+  },
+  "competitorsSmall": {
+    "CC32-40": [
+      {
+        "od": -22,
+        "capacity": null
+      },
+      {
+        "od": -4,
+        "capacity": 15901
+      },
+      {
+        "od": 5,
+        "capacity": 22350
+      },
+      {
+        "od": 32,
+        "capacity": 29515
+      },
+      {
+        "od": 45,
+        "capacity": 27534
+      },
+      {
+        "od": 50,
+        "capacity": 39922
+      },
+      {
+        "od": 60,
+        "capacity": 41253
+      },
+      {
+        "od": 68,
+        "capacity": 42225
+      },
+      {
+        "od": 77,
+        "capacity": 42325
+      }
+    ],
+    "SIM-036": [
+      {
+        "od": 5,
+        "capacity": 16167
+      },
+      {
+        "od": 19,
+        "capacity": 20362
+      },
+      {
+        "od": 36,
+        "capacity": 27007
+      },
+      {
+        "od": 45,
+        "capacity": 30536
+      }
+    ]
+  },
+  "competitorsLarge": {
+    "CC32-60": [
+      {
+        "od": -22,
+        "capacity": null
+      },
+      {
+        "od": -4,
+        "capacity": 28560
+      },
+      {
+        "od": 5,
+        "capacity": 36681
+      },
+      {
+        "od": 32,
+        "capacity": 51694
+      },
+      {
+        "od": 45,
+        "capacity": 62374
+      },
+      {
+        "od": 50,
+        "capacity": 64694
+      },
+      {
+        "od": 60,
+        "capacity": 68203
+      },
+      {
+        "od": 68,
+        "capacity": 68995
+      },
+      {
+        "od": 77,
+        "capacity": 68823
+      }
+    ],
+    "SIM-060": [
+      {
+        "od": 5,
+        "capacity": 31099
+      },
+      {
+        "od": 19,
+        "capacity": 35270
+      },
+      {
+        "od": 36,
+        "capacity": 50465
+      },
+      {
+        "od": 45,
+        "capacity": 53427
+      }
+    ]
+  }
+}

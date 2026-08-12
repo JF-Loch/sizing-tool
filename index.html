@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Centrus Sizing Tool</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="app-header">
+  <div class="header-inner">
+    <h1>Centrus Sizing Tool</h1>
+    <p class="subtitle">System sizing &amp; supplemental heat calculator</p>
+  </div>
+</header>
+
+<main class="app-main">
+
+  <!-- ============ LEFT COLUMN: INPUTS ============ -->
+  <section class="panel inputs-panel">
+
+    <div class="card">
+      <h2>Location &amp; Design Conditions</h2>
+      <div class="field-row">
+        <label for="stateSelect">State</label>
+        <select id="stateSelect"></select>
+      </div>
+      <div class="field-row">
+        <label for="countySelect">County</label>
+        <select id="countySelect"></select>
+      </div>
+
+      <div class="lookup-grid">
+        <div class="lookup-item">
+          <span class="lookup-label">Climate Region</span>
+          <span class="lookup-value" id="lookupRegion">—</span>
+        </div>
+        <div class="lookup-item">
+          <span class="lookup-label">Outdoor Design Temp</span>
+          <span class="lookup-value" id="lookupDesignTemp">— °F</span>
+        </div>
+        <div class="lookup-item">
+          <span class="lookup-label">Cooling Design Temp</span>
+          <span class="lookup-value" id="lookupCoolingTemp">— °F</span>
+        </div>
+        <div class="lookup-item">
+          <span class="lookup-label">Est. Lowest Temp</span>
+          <span class="lookup-value" id="lookupLowestTemp">— °F</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>System Inputs</h2>
+
+      <div class="field-row">
+        <label for="deliveryWaterTemp">Delivery Water Temp (°F)</label>
+        <select id="deliveryWaterTemp">
+          <option value="86">86</option>
+          <option value="95">95</option>
+          <option value="105">105</option>
+          <option value="120" selected>120</option>
+          <option value="140">140</option>
+        </select>
+      </div>
+
+      <div class="field-row">
+        <label for="shutdownTemp">Outdoor Heater Shutdown Temp (°F)</label>
+        <input type="number" id="shutdownTemp" value="65">
+      </div>
+
+      <div class="field-row">
+        <label for="designTempOverride">Outdoor Design Temp (°F)</label>
+        <input type="number" id="designTempOverride" value="">
+        <span class="hint">Auto-filled from county — editable</span>
+      </div>
+
+      <div class="field-row">
+        <label for="btuLoad">BTU Design Load</label>
+        <input type="number" id="btuLoad" value="100000" step="1000">
+      </div>
+
+      <div class="field-row checkbox-row">
+        <label for="worstCaseToggle">
+          <input type="checkbox" id="worstCaseToggle">
+          Enable Worst Case Scenario
+        </label>
+      </div>
+
+      <div class="field-row" id="worstCaseTempRow" style="display:none;">
+        <label for="worstCaseTemp">Outdoor Worst Case Temp (°F)</label>
+        <input type="number" id="worstCaseTemp" value="">
+        <span class="hint">Auto-filled from county — editable</span>
+      </div>
+
+      <p class="hint" style="margin-top:4px;">Results update automatically as you change any value above.</p>
+    </div>
+
+  </section>
+
+  <!-- ============ RIGHT COLUMN: RESULTS ============ -->
+  <section class="panel results-panel">
+
+    <div class="card results-card">
+      <h2>Results</h2>
+      <div class="results-grid">
+        <div class="result-item highlight">
+          <span class="result-label">Supplemental Heat Required</span>
+          <span class="result-value" id="resSupplemental">—</span>
+        </div>
+        <div class="result-item">
+          <span class="result-label">Unit Capacity at Design Temp</span>
+          <span class="result-value" id="resCapacityDesign">—</span>
+        </div>
+        <div class="result-item" id="worstCaseResultBlock" style="display:none;">
+          <span class="result-label">Worst Case BTU Load</span>
+          <span class="result-value" id="resWorstCaseLoad">—</span>
+        </div>
+        <div class="result-item" id="worstCaseCapBlock" style="display:none;">
+          <span class="result-label">Unit Capacity at Worst Case</span>
+          <span class="result-value" id="resCapacityWorstCase">—</span>
+        </div>
+        <div class="result-item highlight" id="worstCaseSupBlock" style="display:none;">
+          <span class="result-label">Supplemental Heat (Worst Case)</span>
+          <span class="result-value" id="resSupplementalWorstCase">—</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Load vs. Capacity Curve</h2>
+      <canvas id="sizingChart" height="260"></canvas>
+      <p class="chart-note" id="balancePointNote"></p>
+    </div>
+
+    <div class="card">
+      <h2>Competitor Comparison</h2>
+      <p class="table-note">Capacity shown at the Outdoor Design Temp (and Worst Case Temp, if enabled), referenced at a fixed 105°F water-out rating condition, consistent with the workbook's competitor "Selected Data" tables.</p>
+      <table class="comparison-table" id="comparisonTable">
+        <thead>
+          <tr>
+            <th>Unit</th>
+            <th>Class</th>
+            <th>Capacity @ Design Temp</th>
+            <th class="worstcase-col">Capacity @ Worst Case</th>
+          </tr>
+        </thead>
+        <tbody id="comparisonTableBody"></tbody>
+      </table>
+    </div>
+
+  </section>
+
+</main>
+
+<footer class="app-footer">
+  <p>Built from Centrus Sizing Tool V1.1.xlsx — county climate data, capacity curves, and competitor references sourced from the original workbook.</p>
+</footer>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<script src="calc.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
