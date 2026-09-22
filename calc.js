@@ -1,24 +1,28 @@
 /* =========================================================================
    Heat Pump Sizing Tool — Calculation Engine
    =========================================================================
-   Loads capacity.json (hand-edited directly — no build script), provides
-   lookup helpers, does the sizing math, builds every point the chart
-   needs to draw, and validates user inputs before calculating.
+   Two modes, HEATING and COOLING, which are mirror images of each other.
 
-   ADDING / REMOVING A HEAT PUMP UNIT
-   ------------------------------------
-   Edit data/capacity.json directly. Under "units", each entry looks like:
-     "some-key": {
-       "displayName": "Whatever shows in the dropdown",
-       "heating": { "<water temp>": [ {"od": <outdoor temp>, "capacity": <BTU/h>}, ... ] },
-       "cooling": { "<water temp>": [ {"od": <outdoor temp>, "capacity": <BTU/h>}, ... ] }
-     }
-   To add a unit, copy an existing block, give it a new key, and fill in
-   its own heating/cooling breakpoints. To remove one, delete its block.
+   HEATING                              COOLING
+   ------------------------------------ ------------------------------------
+   Design Temp = county HDD column      Design Temp = county CDD column
+   Worst Case  = HDD - Regional Adj     Worst Case  = CDD + Regional Adj
+   Curve       = unit.heating (-4..77)  Curve       = unit.cooling (61..110)
+   Load rises as it gets COLDER         Load rises as it gets HOTTER
+   Shortfall -> backup BOILER           Shortfall -> supplemental COOLING
+
+   `modeDir()` returns +1 for heating and -1 for cooling; every directional
+   comparison multiplies through it so one code path serves both.
    ========================================================================= */
 
 let COUNTIES = [];
 let CAPACITY = null;
+
+/* Competitor cooling data doesn't exist yet, so competitor UI is hidden in
+   cooling mode. All competitor code paths remain intact — when the data
+   arrives, add a "coolingPoints" array per competitor in capacity.json and
+   flip this to true. */
+const COMPETITORS_HAVE_COOLING = false;
 
 async function loadData() {
   const [countiesRes, capacityRes] = await Promise.all([
@@ -29,40 +33,75 @@ async function loadData() {
   CAPACITY = await capacityRes.json();
 }
 
-/* ------------------------- Simple lookups ------------------------- */
+/* ------------------------- Mode helpers ------------------------- */
 
-function getStates() {
-  return [...new Set(COUNTIES.map(c => c.state))].sort();
+function modeDir(mode) { return mode === 'cooling' ? -1 : 1; }
+
+function modeConfig(mode) {
+  if (mode === 'cooling') {
+    return {
+      curveKey: 'cooling',
+      designTempField: 'coolingDesignTemp',
+      worstCaseField: 'estimatedHighestTemp',
+      designTempLabel: 'Outdoor Cooling Design Temp',
+      worstCaseLabel: 'Outdoor Worst Case Temp (hottest)',
+      shutdownLabel: 'Outdoor Cooling Lockout Temp',
+      supplementalLabel: 'Supplemental Cooling Required',
+      defaultShutdownTemp: 65,
+      defaultWaterTemp: '44'
+    };
+  }
+  return {
+    curveKey: 'heating',
+    designTempField: 'designTemp',
+    worstCaseField: 'estimatedLowestTemp',
+    designTempLabel: 'Outdoor Design Temp',
+    worstCaseLabel: 'Outdoor Worst Case Temp (coldest)',
+    shutdownLabel: 'Outdoor Heater Shutdown Temp',
+    supplementalLabel: 'Supplemental Heat Required',
+    defaultShutdownTemp: 65,
+    defaultWaterTemp: '120'
+  };
 }
+
+// Water temps available for a unit+mode, read straight from capacity.json.
+function getWaterTemps(unitKey, mode) {
+  const table = CAPACITY.units[unitKey][modeConfig(mode).curveKey] || {};
+  return Object.keys(table).map(Number).sort((a, b) => a - b);
+}
+
+/* ------------------------- Lookups ------------------------- */
+
+function getStates() { return [...new Set(COUNTIES.map(c => c.state))].sort(); }
 function getCounties(state) {
   return COUNTIES.filter(c => c.state === state).map(c => c.county).sort();
 }
 function getCountyData(state, county) {
   return COUNTIES.find(c => c.state === state && c.county === county);
 }
-
 function getUnits() {
   return Object.keys(CAPACITY.units).map(key => ({
-    key,
-    displayName: CAPACITY.units[key].displayName
+    key, displayName: CAPACITY.units[key].displayName
   }));
 }
 
 /* ------------------------- Capacity curve ------------------------- */
 
-function getCapacityCurvePoints(unitKey, waterTemp) {
-  const unit = CAPACITY.units[unitKey];
-  return unit.heating[String(waterTemp)]
-    .map(r => ({ x: r.od, y: r.capacity }))
-    .sort((a, b) => a.x - b.x);
+function getCapacityCurvePoints(unitKey, mode, waterTemp) {
+  const table = CAPACITY.units[unitKey][modeConfig(mode).curveKey];
+  const rows = table[String(waterTemp)] || [];
+  return rows.map(r => ({ x: r.od, y: r.capacity })).sort((a, b) => a.x - b.x);
 }
 
-function getCapacityAtTemp(unitKey, waterTemp, odTemp) {
-  const points = getCapacityCurvePoints(unitKey, waterTemp);
-  if (odTemp <= points[0].x) return points[0].y;
-  if (odTemp >= points[points.length - 1].x) return points[points.length - 1].y;
-  for (let i = 0; i < points.length - 1; i++) {
-    const a = points[i], b = points[i + 1];
+// Straight-line interpolation between bracketing breakpoints, clamped flat
+// beyond either end. Pure math — doesn't know the operating range.
+function getCapacityAtTemp(unitKey, mode, waterTemp, odTemp) {
+  const pts = getCapacityCurvePoints(unitKey, mode, waterTemp);
+  if (pts.length === 0) return 0;
+  if (odTemp <= pts[0].x) return pts[0].y;
+  if (odTemp >= pts[pts.length - 1].x) return pts[pts.length - 1].y;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const a = pts[i], b = pts[i + 1];
     if (odTemp >= a.x && odTemp <= b.x) {
       const frac = (odTemp - a.x) / (b.x - a.x);
       return a.y + frac * (b.y - a.y);
@@ -71,62 +110,73 @@ function getCapacityAtTemp(unitKey, waterTemp, odTemp) {
   return null;
 }
 
-function getEffectiveCapacityAtTemp(unitKey, waterTemp, odTemp) {
-  const points = getCapacityCurvePoints(unitKey, waterTemp);
-  const minOperatingTemp = points[0].x;
-  if (odTemp < minOperatingTemp) return 0;
-  return getCapacityAtTemp(unitKey, waterTemp, odTemp);
+// Past the rated limit in the "demanding" direction the unit produces
+// nothing: colder than the coldest point in heating, hotter than the
+// hottest in cooling. The easy end stays clamped flat.
+function getEffectiveCapacityAtTemp(unitKey, mode, waterTemp, odTemp) {
+  const pts = getCapacityCurvePoints(unitKey, mode, waterTemp);
+  if (pts.length === 0) return 0;
+  const coldest = pts[0].x, hottest = pts[pts.length - 1].x;
+  if (mode === 'cooling') { if (odTemp > hottest) return 0; }
+  else { if (odTemp < coldest) return 0; }
+  return getCapacityAtTemp(unitKey, mode, waterTemp, odTemp);
+}
+
+function getOperatingLimits(unitKey, mode, waterTemp) {
+  const pts = getCapacityCurvePoints(unitKey, mode, waterTemp);
+  if (pts.length === 0) return null;
+  const lo = pts[0], hi = pts[pts.length - 1];
+  return {
+    minOperatingTemp: lo.x,
+    maxOperatingTemp: hi.x,
+    demandLimitTemp: mode === 'cooling' ? hi.x : lo.x,
+    minOperatingLine: [{ x: lo.x, y: lo.y }, { x: lo.x, y: 0 }],
+    maxOperatingLine: [{ x: hi.x, y: hi.y }, { x: hi.x, y: 0 }]
+  };
 }
 
 /* ------------------------- Load line ------------------------- */
 
+// 0 BTU at the Shutdown/Lockout Temp rising to the full Design Load at the
+// Design Temp. Same formula both modes — heating has Shutdown > Design,
+// cooling has Shutdown < Design, so the sign works itself out.
 function loadAtTemp(temp, designLoad, shutdownTemp, designTemp) {
   if (shutdownTemp === designTemp) return designLoad;
-  const val = designLoad * (shutdownTemp - temp) / (shutdownTemp - designTemp);
-  return Math.max(0, val);
+  return Math.max(0, designLoad * (shutdownTemp - temp) / (shutdownTemp - designTemp));
 }
 
-function buildLoadLinePoints(shutdownTemp, designTemp, designLoad, worstCaseEnabled, worstCaseTemp, worstCaseLoad) {
-  const points = [{ x: shutdownTemp, y: 0 }, { x: designTemp, y: designLoad }];
-  if (worstCaseEnabled) points.push({ x: worstCaseTemp, y: worstCaseLoad });
-  const lastPoint = points[points.length - 1];
-  points.push({ x: lastPoint.x, y: 0 });
-  return points;
+function buildLoadLinePoints(shutdownTemp, designTemp, designLoad, wcEnabled, wcTemp, wcLoad) {
+  const pts = [{ x: shutdownTemp, y: 0 }, { x: designTemp, y: designLoad }];
+  if (wcEnabled) pts.push({ x: wcTemp, y: wcLoad });
+  const last = pts[pts.length - 1];
+  pts.push({ x: last.x, y: 0 });
+  return pts;
 }
 
 /* ------------------------- Shaded regions ------------------------- */
 
-function buildSampleGrid(coldEnd, warmEnd, steps) {
-  const grid = [];
-  for (let i = 0; i <= steps; i++) {
-    grid.push(coldEnd + (warmEnd - coldEnd) * (i / steps));
-  }
-  return grid;
+function buildSampleGrid(a, b, steps) {
+  const g = [];
+  for (let i = 0; i <= steps; i++) g.push(a + (b - a) * (i / steps));
+  return g;
 }
 
-function buildShadedRegions(unitKey, waterTemp, designLoad, shutdownTemp, designTemp, worstCaseEnabled, worstCaseTemp) {
-  const coldEnd = worstCaseEnabled ? worstCaseTemp : designTemp;
-  const warmEnd = shutdownTemp;
-  const grid = buildSampleGrid(coldEnd, warmEnd, 120);
+function buildShadedRegions(unitKey, mode, waterTemp, designLoad, shutdownTemp, designTemp, wcEnabled, wcTemp) {
+  const farEnd = wcEnabled ? wcTemp : designTemp;
+  const grid = buildSampleGrid(Math.min(farEnd, shutdownTemp), Math.max(farEnd, shutdownTemp), 120);
 
-  const designLoadPoints = [];
-  const supplementalPoints = [];
-  let balancePoint = null;
-  let prevDiff = null, prevX = null, prevLoad = null;
+  const designLoadPoints = [], supplementalPoints = [];
+  let balancePoint = null, prevDiff = null, prevX = null, prevLoad = null;
 
   grid.forEach(x => {
     const load = loadAtTemp(x, designLoad, shutdownTemp, designTemp);
-    const cap = getEffectiveCapacityAtTemp(unitKey, waterTemp, x);
+    const cap = getEffectiveCapacityAtTemp(unitKey, mode, waterTemp, x);
     designLoadPoints.push({ x, y: Math.min(load, cap) });
     supplementalPoints.push({ x, y: load });
-
     const diff = load - cap;
     if (prevDiff !== null && balancePoint === null && prevDiff * diff < 0) {
       const frac = prevDiff / (prevDiff - diff);
-      balancePoint = {
-        x: prevX + frac * (x - prevX),
-        y: prevLoad + frac * (load - prevLoad)
-      };
+      balancePoint = { x: prevX + frac * (x - prevX), y: prevLoad + frac * (load - prevLoad) };
     }
     prevDiff = diff; prevX = x; prevLoad = load;
   });
@@ -134,122 +184,104 @@ function buildShadedRegions(unitKey, waterTemp, designLoad, shutdownTemp, design
   return { designLoadPoints, supplementalPoints, balancePoint };
 }
 
-/* ------------------------- Input validation ------------------------- */
+/* ------------------------- Validation ------------------------- */
 
 function validateInputs(inputs) {
-  const { designLoad, shutdownTemp, designTemp, waterTemp, worstCaseEnabled, worstCaseTemp } = inputs;
-  const errors = [];
+  const { mode, designLoad, shutdownTemp, designTemp, waterTemp, worstCaseEnabled, worstCaseTemp } = inputs;
+  const cfg = modeConfig(mode), dir = modeDir(mode), errors = [];
 
-  if (isNaN(designLoad) || designLoad <= 0) {
-    errors.push('BTU Design Load must be a positive number.');
-  }
-  if (isNaN(waterTemp)) {
-    errors.push('Delivery Water Temp must be a valid number.');
-  }
-  if (isNaN(shutdownTemp)) {
-    errors.push('Outdoor Heater Shutdown Temp must be a valid number.');
-  }
-  if (isNaN(designTemp)) {
-    errors.push('Outdoor Design Temp must be a valid number.');
-  }
+  if (isNaN(designLoad) || designLoad <= 0) errors.push('BTU Design Load must be a positive number.');
+  if (isNaN(waterTemp)) errors.push('Delivery Water Temp must be a valid number.');
+  if (isNaN(shutdownTemp)) errors.push(`${cfg.shutdownLabel} must be a valid number.`);
+  if (isNaN(designTemp)) errors.push(`${cfg.designTempLabel} must be a valid number.`);
 
-  if (!isNaN(shutdownTemp) && !isNaN(designTemp) && shutdownTemp <= designTemp) {
-    errors.push('Outdoor Heater Shutdown Temp must be warmer than the Outdoor Design Temp.');
+  if (!isNaN(shutdownTemp) && !isNaN(designTemp) && dir * (shutdownTemp - designTemp) <= 0) {
+    errors.push(mode === 'cooling'
+      ? `${cfg.shutdownLabel} must be cooler than the ${cfg.designTempLabel}.`
+      : `${cfg.shutdownLabel} must be warmer than the ${cfg.designTempLabel}.`);
   }
 
   if (worstCaseEnabled) {
     if (isNaN(worstCaseTemp)) {
       errors.push('Outdoor Worst Case Temp must be a valid number.');
-    } else if (!isNaN(designTemp) && worstCaseTemp >= designTemp) {
-      errors.push('Outdoor Worst Case Temp must be colder than the Outdoor Design Temp.');
+    } else if (!isNaN(designTemp) && dir * (designTemp - worstCaseTemp) <= 0) {
+      errors.push(mode === 'cooling'
+        ? `Outdoor Worst Case Temp must be hotter than the ${cfg.designTempLabel}.`
+        : `Outdoor Worst Case Temp must be colder than the ${cfg.designTempLabel}.`);
     }
   }
-
   return errors;
 }
 
-/* ------------------------- Main sizing calculation ------------------------- */
+/* ------------------------- Main calculation ------------------------- */
 
 function runSizingCalculation(inputs) {
-  const { unitKey, designLoad, shutdownTemp, designTemp, waterTemp, worstCaseEnabled, worstCaseTemp } = inputs;
+  const { unitKey, mode, designLoad, shutdownTemp, designTemp, waterTemp, worstCaseEnabled, worstCaseTemp } = inputs;
 
-  const capacityCurvePoints = getCapacityCurvePoints(unitKey, waterTemp);
-  const minOperatingTemp = capacityCurvePoints[0].x;
-  const maxOperatingTemp = capacityCurvePoints[capacityCurvePoints.length - 1].x;
+  const capacityCurvePoints = getCapacityCurvePoints(unitKey, mode, waterTemp);
+  const limits = getOperatingLimits(unitKey, mode, waterTemp);
 
-  const capacityAtDesign = getEffectiveCapacityAtTemp(unitKey, waterTemp, designTemp);
+  const capacityAtDesign = getEffectiveCapacityAtTemp(unitKey, mode, waterTemp, designTemp);
   const supplementalAtDesign = Math.max(0, designLoad - capacityAtDesign);
 
   let worstCaseLoad = null, capacityAtWorstCase = null, supplementalAtWorstCase = null;
   if (worstCaseEnabled) {
     worstCaseLoad = loadAtTemp(worstCaseTemp, designLoad, shutdownTemp, designTemp);
-    capacityAtWorstCase = getEffectiveCapacityAtTemp(unitKey, waterTemp, worstCaseTemp);
+    capacityAtWorstCase = getEffectiveCapacityAtTemp(unitKey, mode, waterTemp, worstCaseTemp);
     supplementalAtWorstCase = Math.max(0, worstCaseLoad - capacityAtWorstCase);
   }
 
   const loadLinePoints = buildLoadLinePoints(shutdownTemp, designTemp, designLoad, worstCaseEnabled, worstCaseTemp, worstCaseLoad);
-
   const { designLoadPoints, supplementalPoints, balancePoint } =
-    buildShadedRegions(unitKey, waterTemp, designLoad, shutdownTemp, designTemp, worstCaseEnabled, worstCaseTemp);
+    buildShadedRegions(unitKey, mode, waterTemp, designLoad, shutdownTemp, designTemp, worstCaseEnabled, worstCaseTemp);
 
-  const minOperatingLine = [
-    { x: minOperatingTemp, y: capacityCurvePoints[0].y },
-    { x: minOperatingTemp, y: 0 }
-  ];
-  const maxOperatingLine = [
-    { x: maxOperatingTemp, y: capacityCurvePoints[capacityCurvePoints.length - 1].y },
-    { x: maxOperatingTemp, y: 0 }
-  ];
-
+  // Only meaningful when Worst Case is on — that's the only time the load
+  // line continues past the original Design Day point.
   const designDayLine = worstCaseEnabled
-    ? [{ x: designTemp, y: designLoad }, { x: designTemp, y: 0 }]
-    : null;
-
-  const designPoint = { x: designTemp, y: capacityAtDesign };
+    ? [{ x: designTemp, y: designLoad }, { x: designTemp, y: 0 }] : null;
 
   return {
-    capacityAtDesign,
-    supplementalAtDesign,
-    worstCaseLoad,
-    capacityAtWorstCase,
-    supplementalAtWorstCase,
-    loadLinePoints,
-    capacityCurvePoints,
-    designLoadPoints,
-    supplementalPoints,
-    designPoint,
-    balancePoint,
-    minOperatingTemp,
-    maxOperatingTemp,
-    minOperatingLine,
-    maxOperatingLine,
-    designDayLine
+    mode,
+    capacityAtDesign, supplementalAtDesign,
+    worstCaseLoad, capacityAtWorstCase, supplementalAtWorstCase,
+    loadLinePoints, capacityCurvePoints,
+    designLoadPoints, supplementalPoints,
+    designPoint: { x: designTemp, y: capacityAtDesign },
+    balancePoint, designDayLine,
+    minOperatingTemp: limits.minOperatingTemp,
+    maxOperatingTemp: limits.maxOperatingTemp,
+    demandLimitTemp: limits.demandLimitTemp,
+    minOperatingLine: limits.minOperatingLine,
+    maxOperatingLine: limits.maxOperatingLine
   };
 }
 
-/* ------------------------- Competitor comparison + curves ------------------------- */
+/* ------------------------- Competitors (heating only for now) ------------------------- */
 
+function competitorsAvailable(mode) {
+  return mode !== 'cooling' || COMPETITORS_HAVE_COOLING;
+}
 function getCompetitorEntry(model) {
   return CAPACITY.competitorsSmall[model] || CAPACITY.competitorsLarge[model];
 }
 function getCompetitorClass(model) {
   return CAPACITY.competitorsSmall[model] ? '3-3.5 Ton' : '5-5.5 Ton';
 }
-function getCompetitorCurvePoints(model) {
+function getCompetitorCurvePoints(model, mode) {
   const entry = getCompetitorEntry(model);
   if (!entry) return [];
-  return entry.points
-    .filter(p => p.capacity !== null && p.capacity !== undefined)
-    .map(p => ({ x: p.od, y: p.capacity }))
-    .sort((a, b) => a.x - b.x);
+  const raw = (mode === 'cooling') ? (entry.coolingPoints || []) : entry.points;
+  return raw.filter(p => p.capacity !== null && p.capacity !== undefined)
+            .map(p => ({ x: p.od, y: p.capacity }))
+            .sort((a, b) => a.x - b.x);
 }
-function interpolateCompetitor(model, odTemp) {
-  const points = getCompetitorCurvePoints(model);
-  if (points.length === 0) return null;
-  if (odTemp <= points[0].x) return points[0].y;
-  if (odTemp >= points[points.length - 1].x) return points[points.length - 1].y;
-  for (let i = 0; i < points.length - 1; i++) {
-    const a = points[i], b = points[i + 1];
+function interpolateCompetitor(model, mode, odTemp) {
+  const pts = getCompetitorCurvePoints(model, mode);
+  if (pts.length === 0) return null;
+  if (odTemp <= pts[0].x) return pts[0].y;
+  if (odTemp >= pts[pts.length - 1].x) return pts[pts.length - 1].y;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const a = pts[i], b = pts[i + 1];
     if (odTemp >= a.x && odTemp <= b.x) {
       const frac = (odTemp - a.x) / (b.x - a.x);
       return a.y + frac * (b.y - a.y);
@@ -257,22 +289,24 @@ function interpolateCompetitor(model, odTemp) {
   }
   return null;
 }
-function buildCompetitorComparison(designTemp, worstCaseTemp, worstCaseEnabled) {
-  const allModels = [...Object.keys(CAPACITY.competitorsSmall), ...Object.keys(CAPACITY.competitorsLarge)];
-  return allModels.map(model => ({
+function buildCompetitorComparison(mode, designTemp, worstCaseTemp, worstCaseEnabled) {
+  if (!competitorsAvailable(mode)) return [];
+  const models = [...Object.keys(CAPACITY.competitorsSmall), ...Object.keys(CAPACITY.competitorsLarge)];
+  return models.map(model => ({
     model,
     displayName: getCompetitorEntry(model).displayName,
     className: getCompetitorClass(model),
-    capDesign: interpolateCompetitor(model, designTemp),
-    capWorst: worstCaseEnabled ? interpolateCompetitor(model, worstCaseTemp) : null
+    capDesign: interpolateCompetitor(model, mode, designTemp),
+    capWorst: worstCaseEnabled ? interpolateCompetitor(model, mode, worstCaseTemp) : null
   }));
 }
-function getAllCompetitorCurves() {
-  const allModels = [...Object.keys(CAPACITY.competitorsSmall), ...Object.keys(CAPACITY.competitorsLarge)];
-  return allModels.map(model => ({
+function getAllCompetitorCurves(mode) {
+  if (!competitorsAvailable(mode)) return [];
+  const models = [...Object.keys(CAPACITY.competitorsSmall), ...Object.keys(CAPACITY.competitorsLarge)];
+  return models.map(model => ({
     model,
     displayName: getCompetitorEntry(model).displayName,
     className: getCompetitorClass(model),
-    points: getCompetitorCurvePoints(model)
+    points: getCompetitorCurvePoints(model, mode)
   }));
 }
