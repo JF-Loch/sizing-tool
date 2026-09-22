@@ -13,15 +13,19 @@
     <div class="header-brand">
       <div>
         <h1>Heat Pump Sizing Tool</h1>
-        <p class="subtitle">System sizing &amp; supplemental heat calculator — Lochinvar</p>
+        <p class="subtitle">System sizing &amp; supplemental load calculator — Lochinvar</p>
       </div>
+    </div>
+    <div class="mode-pill-group" role="group" aria-label="Operating mode">
+      <button type="button" class="mode-pill active" data-mode="heating">Heating</button>
+      <button type="button" class="mode-pill" data-mode="cooling">Cooling</button>
     </div>
   </div>
 </header>
 
 <main class="app-main">
 
-  <!-- ============ LEFT COLUMN: INPUTS ============ -->
+  <!-- ============ LEFT: INPUTS ============ -->
   <section class="panel inputs-panel">
 
     <div class="card">
@@ -29,6 +33,7 @@
       <div class="field-row">
         <label for="unitSelect">Heat Pump Model</label>
         <select id="unitSelect"></select>
+        <span class="hint">Shared across Heating and Cooling.</span>
       </div>
     </div>
 
@@ -54,27 +59,31 @@
         </div>
 
         <div class="lookup-grid">
-          <div class="lookup-item">
+          <div class="lookup-item" id="tileRegion">
             <span class="lookup-label">Climate Region</span>
             <span class="lookup-value" id="lookupRegion">—</span>
           </div>
-          <div class="lookup-item">
-            <span class="lookup-label">Outdoor Design Temp</span>
+          <div class="lookup-item" id="tileHeatDesign">
+            <span class="lookup-label">Heating Design Temp</span>
             <span class="lookup-value" id="lookupDesignTemp">— °F</span>
           </div>
-          <div class="lookup-item">
+          <div class="lookup-item" id="tileLowest">
+            <span class="lookup-label">Est. Lowest Temp</span>
+            <span class="lookup-value" id="lookupLowestTemp">— °F</span>
+          </div>
+          <div class="lookup-item" id="tileCoolDesign" style="display:none;">
             <span class="lookup-label">Cooling Design Temp</span>
             <span class="lookup-value" id="lookupCoolingTemp">— °F</span>
           </div>
-          <div class="lookup-item">
-            <span class="lookup-label">Est. Lowest Temp</span>
-            <span class="lookup-value" id="lookupLowestTemp">— °F</span>
+          <div class="lookup-item" id="tileHighest" style="display:none;">
+            <span class="lookup-label">Est. Highest Temp</span>
+            <span class="lookup-value" id="lookupHighestTemp">— °F</span>
           </div>
         </div>
       </div>
 
       <div class="field-row">
-        <label for="designTempOverride">Outdoor Design Temp (°F)</label>
+        <label for="designTempOverride" id="designTempLabel">Outdoor Design Temp (°F)</label>
         <input type="number" id="designTempOverride" value="">
         <span class="hint" id="designTempHint">Auto-filled from county — switch to Manual Entry to type your own.</span>
       </div>
@@ -86,9 +95,8 @@
             Enable Worst Case Scenario
           </label>
         </div>
-
         <div class="field-row" id="worstCaseTempRow" style="display:none;">
-          <label for="worstCaseTemp">Outdoor Worst Case Temp (°F)</label>
+          <label for="worstCaseTemp" id="worstCaseTempLabel">Outdoor Worst Case Temp (°F)</label>
           <input type="number" id="worstCaseTemp" value="" readonly>
           <span class="hint">Auto-filled from county</span>
         </div>
@@ -102,26 +110,23 @@
 
       <div class="field-row">
         <label for="deliveryWaterTemp">Delivery Water Temp (°F)</label>
-        <select id="deliveryWaterTemp">
-          <option value="86">86</option>
-          <option value="95">95</option>
-          <option value="105">105</option>
-          <option value="120" selected>120</option>
-          <option value="140">140</option>
-        </select>
+        <select id="deliveryWaterTemp"></select>
       </div>
 
       <div class="field-row">
-        <label for="shutdownTemp">Outdoor Heater Shutdown Temp (°F)</label>
+        <label for="shutdownTemp" id="shutdownTempLabel">Outdoor Heater Shutdown Temp (°F)</label>
         <input type="number" id="shutdownTemp" value="65">
       </div>
 
       <div class="field-row">
-        <label for="btuLoad">BTU Design Load</label>
+        <label for="btuLoad" id="btuLoadLabel">BTU Design Load</label>
         <input type="number" id="btuLoad" value="100000" step="1000">
       </div>
 
-      <p class="hint" style="margin-top:4px;">Results update automatically as you change any value above.</p>
+      <p class="hint" style="margin-top:4px;">
+        Results update automatically as you change any value. Heating and Cooling
+        keep separate inputs — changes on one don't affect the other.
+      </p>
 
       <div class="button-row">
         <button type="button" id="resetBtn" class="btn btn-secondary">Reset to Defaults</button>
@@ -131,7 +136,7 @@
 
   </section>
 
-  <!-- ============ RIGHT COLUMN: RESULTS ============ -->
+  <!-- ============ RIGHT: RESULTS ============ -->
   <section class="panel results-panel">
 
     <div id="validationErrors" class="validation-banner" style="display:none;"></div>
@@ -142,7 +147,7 @@
         <h2>Results</h2>
         <div class="results-grid">
           <div class="result-item highlight">
-            <span class="result-label">Supplemental Heat Required</span>
+            <span class="result-label" id="resSupplementalLabel">Supplemental Heat Required</span>
             <span class="result-value" id="resSupplemental">—</span>
           </div>
           <div class="result-item">
@@ -158,25 +163,29 @@
             <span class="result-value" id="resCapacityWorstCase">—</span>
           </div>
           <div class="result-item highlight" id="worstCaseSupBlock" style="display:none;">
-            <span class="result-label">Supplemental Heat (Worst Case)</span>
+            <span class="result-label" id="resSupplementalWorstCaseLabel">Supplemental Heat (Worst Case)</span>
             <span class="result-value" id="resSupplementalWorstCase">—</span>
           </div>
         </div>
       </div>
 
       <div class="card">
-        <h2>Load vs. Capacity Curve</h2>
-        <div class="field-row checkbox-row" style="margin-bottom:16px;">
+        <h2 id="chartCardTitle">Load vs. Capacity Curve</h2>
+        <div class="field-row checkbox-row" id="competitorToggleRow" style="margin-bottom:16px;">
           <label for="showCompetitorsToggle">
             <input type="checkbox" id="showCompetitorsToggle">
             Show Competitor Units on Graph
           </label>
         </div>
+        <p class="hint" id="competitorUnavailableNote" style="display:none;margin-bottom:14px;">
+          Competitor comparison is unavailable in cooling mode — competitor cooling
+          capacity data hasn't been supplied yet.
+        </p>
         <canvas id="sizingChart" height="260"></canvas>
         <p class="chart-note" id="balancePointNote"></p>
       </div>
 
-      <div class="card">
+      <div class="card" id="competitorCard">
         <h2>Competitor Comparison</h2>
         <p class="table-note">Capacity shown at the Outdoor Design Temp (and Worst Case Temp, if enabled), referenced at a fixed 105°F water-out rating condition.</p>
         <table class="comparison-table" id="comparisonTable">
