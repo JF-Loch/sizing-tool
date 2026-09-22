@@ -1,116 +1,99 @@
-# Lochinvar Heat Pump Sizing Tool — Web App
+# Lochinvar Heat Pump Sizing Tool
 
-A working web version of the heat pump sizing workbook. Static site
-(HTML/CSS/JS) — no server, build step, or Python script required.
-
-## ✅ Full data set in this delivery
-
-`data/counties.json` contains the **complete 3,142-county dataset across
-all 51 states/DC**, re-extracted directly from the freshly re-uploaded
-`Centrus Sizing Tool V1.1.xlsx` workbook. (A prior delivery in this
-thread only had a partial 16-state set due to a workspace reset — that
-issue is resolved here.)
-
-All core math was re-verified against two independent examples straight
-from the workbook after this rebuild:
-- **Wilson, TN** — 100,000 BTU load, 120°F water → 35,958.64 BTU/h
-  capacity at design temp, 64,041.36 BTU/h supplemental heat required.
-- **Amite, MS** — 120,000 BTU load, 120°F water, Design Temp 28°F →
-  37,849.46 BTU/h capacity, 82,150.54 BTU/h supplemental heat (matches
-  the workbook's "User Entry" tab exactly); with Worst Case Temp 20°F
-  and 100,000 BTU load → 121,621.62 BTU/h worst case load (matches the
-  "Advanced" tab exactly).
-
-## Running it locally
+Static site (HTML/CSS/JS). No server, build step, or Python script.
 
 ```bash
-cd site
-python3 -m http.server 8080
-# then open http://localhost:8080
+cd site && python3 -m http.server 8080   # open http://localhost:8080
 ```
 
-## Files
+## Heating vs. Cooling
 
-```
-index.html      Page structure / layout
-style.css       Lochinvar-themed styling
-calc.js         Calculation engine, chart data-point construction, input validation
-app.js          UI wiring, mode toggle, reset button, print/export view
-data/
-  counties.json   All 3,142 US counties across 51 states/DC
-  capacity.json   Heat pump unit + competitor capacity curves. Hand-edit
-                  this directly (no build script) — see structure below.
-```
+A Heating/Cooling switch sits in the page header. The two modes are mirror
+images of one another:
 
-## Editing capacity.json directly
+|                       | Heating                   | Cooling                    |
+|-----------------------|---------------------------|----------------------------|
+| Outdoor Design Temp   | county **HDD** column     | county **CDD** column      |
+| Worst Case Temp       | HDD **−** Regional Adj.   | CDD **+** Regional Adj.    |
+| Capacity curve        | `unit.heating` (−4…77°F)  | `unit.cooling` (61…110°F)  |
+| Delivery Water Temps  | 86/95/105/120/140         | 44/57/64                   |
+| Load line             | rises as it gets colder   | rises as it gets hotter    |
+| Chart x-axis          | reversed (cold → right)   | normal (hot → right)       |
+| Operating limit       | below −4°F ⇒ 0 capacity   | above 110°F ⇒ 0 capacity   |
+| Accent color          | red                       | blue                       |
+| Competitor comparison | shown                     | hidden (no data yet)       |
 
-There's no build script — just open `data/capacity.json` in a text editor
-and edit it. Structure:
+## Independent inputs per mode
+
+Heating and Cooling each keep a **completely separate set of inputs**. Typing
+10,000 BTU in Cooling doesn't touch the 100,000 sitting in Heating; changing
+the Cooling Lockout Temp doesn't disturb the Heater Shutdown Temp. Switching
+modes banks the outgoing mode's values and restores the incoming mode's.
+
+Per-mode: Design Conditions source, Delivery Water Temp, Shutdown/Lockout
+Temp, BTU Design Load, Design Temp, Worst Case toggle + temp, competitor
+graph toggle.
+
+**Shared** (deliberately): Heat Pump Model, State, County. These describe the
+physical unit and the physical building, which don't change between heating
+and cooling season. Changing the county updates both modes' design temps from
+that county's HDD/CDD columns.
+
+**Reset to Defaults** resets only the current mode's inputs and stays on the
+current mode. The other mode's values are left untouched.
+
+## Competitor data in cooling mode
+
+Competitor cooling capacities haven't been supplied, so in cooling mode the
+comparison table, the graph checkbox, and the chart series are hidden. **No
+code was deleted.** To enable later:
+1. Add a `"coolingPoints": [ {"od": <F>, "capacity": <BTU/h>}, ... ]` array
+   next to the existing `"points"` array for each competitor in
+   `data/capacity.json`.
+2. Set `COMPETITORS_HAVE_COOLING = true` at the top of `calc.js`.
+
+## Editing capacity.json
 
 ```json
 {
   "units": {
-    "centrus":   { "displayName": "Centrus",   "heating": {...}, "cooling": {...} },
-    "test-unit": { "displayName": "Test unit", "heating": {...}, "cooling": {...} }
+    "centrus": {
+      "displayName": "Centrus",
+      "heating": { "120": [ {"od": -4, "capacity": 34804}, ... ] },
+      "cooling": { "44":  [ {"od": 61, "capacity": 37713}, ... ] }
+    }
   },
-  "competitorsSmall": {
-    "CC32-40": { "displayName": "Competitor Unit A", "points": [...] },
-    "SIM-036": { "displayName": "Competitor Unit B", "points": [...] }
-  },
-  "competitorsLarge": {
-    "CC32-60": { "displayName": "Competitor Unit A", "points": [...] },
-    "SIM-060": { "displayName": "Competitor Unit B", "points": [...] }
-  }
+  "competitorsSmall": { "CC32-40": { "displayName": "Competitor Unit A", "points": [...] } },
+  "competitorsLarge": { ... }
 }
 ```
 
-**To add a heat pump unit:** copy the `"centrus"` block under `"units"`,
-paste it as a new entry with a new key, give it a `displayName`, and fill
-in its own `heating`/`cooling` breakpoints. Save and refresh — the new
-unit shows up automatically in the "Heat Pump Model" dropdown.
-
-**To remove a unit:** delete its block. Same for competitor entries.
-
-**⚠️ Watch your commas/brackets** — a stray missing comma or bracket will
-break the whole file. Any text editor with JSON syntax highlighting, or
-pasting into jsonlint.com, will catch this quickly.
-
-The `"test-unit"` entry is a placeholder (duplicate of the Centrus data)
-kept around to verify the multi-unit dropdown works. Delete it whenever
-it's no longer useful.
+Add a unit by copying a block and giving it a new key; remove one by deleting
+its block. Water-temp dropdown options are read directly from whatever keys
+exist under `heating`/`cooling`, so a unit with different rated water temps
+just works. **Watch your commas/brackets** — nothing validates the JSON.
 
 ## Change log
 
-- **v1.7** (this release, rebuilt from the re-uploaded source workbook):
-  - **Full 51-state county dataset** restored (previously a partial
-    16-state set due to a mid-thread workspace reset).
-  - **Renamed** the app from "Centrus Sizing Tool" to **"Heat Pump
-    Sizing Tool"** everywhere (page title, header, footer).
-  - **Removed the logo placeholder** from the header — ready for a real
-    logo whenever provided.
-  - **Removed the Balance Point** marker — only the Design Point remains
-    on the chart.
-  - **Moved the minimum-operating-temp warning banner** to directly
-    below the Design Conditions card in the input column.
-  - **Input validation**: BTU Design Load must be positive; Shutdown
-    Temp must be warmer than Design Temp; Worst Case Temp (if enabled)
-    must be colder than Design Temp. Errors show in an amber banner and
-    hide Results/Chart/Table until fixed.
-  - **Print / Export Summary button**: opens a clean, static one-page
-    summary (inputs, results, chart snapshot) in a new tab with its own
-    print button.
-  - **Reset to Defaults button**: restores unit, region, all system
-    inputs, and both toggles back to their starting values in one click.
-- **v1.6** — Removed the Python build script; added the Design
-  Conditions mode toggle (By Region vs. Manual Entry); competitor units
-  can be graphed directly on the chart; competitor names anonymized as
-  "Competitor Unit A/B" per size class; Lochinvar red/charcoal theming.
-- **v1.5** — Multi-unit support added; Design Day reference line.
-- **v1.4** — Capacity correctly drops to zero below the unit's minimum
-  rated temp; warning banner; dashed Operating Range Limit lines;
-  Design Point / Balance Point labeling.
-- **v1.3** — No Calculate button (auto-recalculates); shaded Design
-  Load / Supplemental Heat Load regions.
-- **v1.2** — Fixed chart to match the workbook's actual data.
-- **v1.1** — Fixed chart x-axis direction.
+- **v2.1**
+  - **Independent inputs per mode.** All system/design inputs are now stored
+    per mode and restored on switch (see above). Previously BTU load and
+    shutdown temp bled across modes or snapped back to defaults.
+  - **Lookup tiles toggle visibility** instead of greying out — cooling mode
+    shows only Cooling Design Temp + Est. Highest Temp, heating shows only
+    Heating Design Temp + Est. Lowest Temp.
+  - **Reset to Defaults no longer changes mode.** It resets only the current
+    mode's inputs and leaves the other mode's snapshot alone.
+- **v2.0** — Cooling mode added (CDD design temp, CDD + adj worst case,
+  cooling capacity curve, flipped validation/axis, blue accent, competitor
+  UI hidden behind `COMPETITORS_HAVE_COOLING`).
+- **v1.7** — Renamed to Heat Pump Sizing Tool; input validation;
+  print/export; reset button; warning banner under Design Conditions.
+- **v1.6** — Design Conditions source toggle; competitor graphing;
+  anonymized competitor names; Lochinvar theming; build script removed.
+- **v1.5** — Multi-unit support; Design Day reference line.
+- **v1.4** — Zero capacity beyond rated limit; operating range lines.
+- **v1.3** — Auto-recalculation; shaded load regions.
+- **v1.2** — Chart corrected to match workbook data.
+- **v1.1** — Chart x-axis direction.
 - **v1.0** — Initial build.
