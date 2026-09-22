@@ -146,7 +146,6 @@ function applyModeChrome(mode) {
   const show = competitorsAvailable(mode);
   document.getElementById('competitorCard').style.display = show ? '' : 'none';
   document.getElementById('competitorToggleRow').style.display = show ? '' : 'none';
-  document.getElementById('competitorUnavailableNote').style.display = show ? 'none' : '';
 }
 
 function populateWaterTemps() {
