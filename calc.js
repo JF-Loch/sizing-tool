@@ -1,7 +1,7 @@
 /* =========================================================================
    Heat Pump Sizing Tool — Calculation Engine
    =========================================================================
-   Two modes, HEATING and COOLING, which are mirror images of each other.
+   Two modes, HEATING and COOLING, mirror images of each other.
 
    HEATING                              COOLING
    ------------------------------------ ------------------------------------
@@ -9,20 +9,35 @@
    Worst Case  = HDD - Regional Adj     Worst Case  = CDD + Regional Adj
    Curve       = unit.heating (-4..77)  Curve       = unit.cooling (61..110)
    Load rises as it gets COLDER         Load rises as it gets HOTTER
-   Shortfall -> backup BOILER           Shortfall -> supplemental COOLING
 
    `modeDir()` returns +1 for heating and -1 for cooling; every directional
    comparison multiplies through it so one code path serves both.
+
+   COMPETITOR WATER-TEMP MATCHING (cooling)
+   ----------------------------------------
+   Competitor cooling data is published at different leaving-water temps
+   than the Centrus (CC32: 45/48/54°F, SIM: 45/59°F vs Centrus 44/57/64°F).
+   So the competitor curve is interpolated to whatever Delivery Water Temp
+   the user has selected:
+     1. At each outdoor temp, take the competitor's capacity at the two
+        published water temps that bracket the selected one.
+     2. Interpolate linearly between them.
+     3. If the selected water temp is outside the published range, the two
+        nearest columns are used to linearly EXTRAPOLATE, and the result is
+        flagged `extrapolated: true` so the UI can mark it as an estimate.
+   Heating competitor data is unchanged (fixed 105°F reference column).
    ========================================================================= */
 
 let COUNTIES = [];
 let CAPACITY = null;
 
-/* Competitor cooling data doesn't exist yet, so competitor UI is hidden in
-   cooling mode. All competitor code paths remain intact — when the data
-   arrives, add a "coolingPoints" array per competitor in capacity.json and
-   flip this to true. */
-const COMPETITORS_HAVE_COOLING = false;
+/* Competitor cooling data is now supplied (Competitor Cooling Data tab). */
+const COMPETITORS_HAVE_COOLING = true;
+
+/* Competitors can't deliver water temps far outside what they publish, so
+   extrapolation is capped. With 3°F: 44°F and 57°F are estimated, 64°F
+   shows N/A for every competitor. */
+const MAX_COOLING_WATER_EXTRAPOLATION_F = 3;
 
 async function loadData() {
   const [countiesRes, capacityRes] = await Promise.all([
@@ -64,7 +79,6 @@ function modeConfig(mode) {
   };
 }
 
-// Water temps available for a unit+mode, read straight from capacity.json.
 function getWaterTemps(unitKey, mode) {
   const table = CAPACITY.units[unitKey][modeConfig(mode).curveKey] || {};
   return Object.keys(table).map(Number).sort((a, b) => a - b);
@@ -85,7 +99,21 @@ function getUnits() {
   }));
 }
 
-/* ------------------------- Capacity curve ------------------------- */
+/* ------------------------- Generic 1-D interpolation ------------------------- */
+
+// pts: [{x, y}] sorted ascending. Clamped flat beyond either end.
+function interp1D(pts, x) {
+  if (pts.length === 0) return null;
+  if (x <= pts[0].x) return pts[0].y;
+  if (x >= pts[pts.length - 1].x) return pts[pts.length - 1].y;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const a = pts[i], b = pts[i + 1];
+    if (x >= a.x && x <= b.x) return a.y + (x - a.x) / (b.x - a.x) * (b.y - a.y);
+  }
+  return null;
+}
+
+/* ------------------------- Unit capacity curve ------------------------- */
 
 function getCapacityCurvePoints(unitKey, mode, waterTemp) {
   const table = CAPACITY.units[unitKey][modeConfig(mode).curveKey];
@@ -93,21 +121,9 @@ function getCapacityCurvePoints(unitKey, mode, waterTemp) {
   return rows.map(r => ({ x: r.od, y: r.capacity })).sort((a, b) => a.x - b.x);
 }
 
-// Straight-line interpolation between bracketing breakpoints, clamped flat
-// beyond either end. Pure math — doesn't know the operating range.
 function getCapacityAtTemp(unitKey, mode, waterTemp, odTemp) {
-  const pts = getCapacityCurvePoints(unitKey, mode, waterTemp);
-  if (pts.length === 0) return 0;
-  if (odTemp <= pts[0].x) return pts[0].y;
-  if (odTemp >= pts[pts.length - 1].x) return pts[pts.length - 1].y;
-  for (let i = 0; i < pts.length - 1; i++) {
-    const a = pts[i], b = pts[i + 1];
-    if (odTemp >= a.x && odTemp <= b.x) {
-      const frac = (odTemp - a.x) / (b.x - a.x);
-      return a.y + frac * (b.y - a.y);
-    }
-  }
-  return null;
+  const v = interp1D(getCapacityCurvePoints(unitKey, mode, waterTemp), odTemp);
+  return v === null ? 0 : v;
 }
 
 // Past the rated limit in the "demanding" direction the unit produces
@@ -116,9 +132,8 @@ function getCapacityAtTemp(unitKey, mode, waterTemp, odTemp) {
 function getEffectiveCapacityAtTemp(unitKey, mode, waterTemp, odTemp) {
   const pts = getCapacityCurvePoints(unitKey, mode, waterTemp);
   if (pts.length === 0) return 0;
-  const coldest = pts[0].x, hottest = pts[pts.length - 1].x;
-  if (mode === 'cooling') { if (odTemp > hottest) return 0; }
-  else { if (odTemp < coldest) return 0; }
+  if (mode === 'cooling') { if (odTemp > pts[pts.length - 1].x) return 0; }
+  else { if (odTemp < pts[0].x) return 0; }
   return getCapacityAtTemp(unitKey, mode, waterTemp, odTemp);
 }
 
@@ -137,9 +152,6 @@ function getOperatingLimits(unitKey, mode, waterTemp) {
 
 /* ------------------------- Load line ------------------------- */
 
-// 0 BTU at the Shutdown/Lockout Temp rising to the full Design Load at the
-// Design Temp. Same formula both modes — heating has Shutdown > Design,
-// cooling has Shutdown < Design, so the sign works itself out.
 function loadAtTemp(temp, designLoad, shutdownTemp, designTemp) {
   if (shutdownTemp === designTemp) return designLoad;
   return Math.max(0, designLoad * (shutdownTemp - temp) / (shutdownTemp - designTemp));
@@ -164,24 +176,14 @@ function buildSampleGrid(a, b, steps) {
 function buildShadedRegions(unitKey, mode, waterTemp, designLoad, shutdownTemp, designTemp, wcEnabled, wcTemp) {
   const farEnd = wcEnabled ? wcTemp : designTemp;
   const grid = buildSampleGrid(Math.min(farEnd, shutdownTemp), Math.max(farEnd, shutdownTemp), 120);
-
   const designLoadPoints = [], supplementalPoints = [];
-  let balancePoint = null, prevDiff = null, prevX = null, prevLoad = null;
-
   grid.forEach(x => {
     const load = loadAtTemp(x, designLoad, shutdownTemp, designTemp);
     const cap = getEffectiveCapacityAtTemp(unitKey, mode, waterTemp, x);
     designLoadPoints.push({ x, y: Math.min(load, cap) });
     supplementalPoints.push({ x, y: load });
-    const diff = load - cap;
-    if (prevDiff !== null && balancePoint === null && prevDiff * diff < 0) {
-      const frac = prevDiff / (prevDiff - diff);
-      balancePoint = { x: prevX + frac * (x - prevX), y: prevLoad + frac * (load - prevLoad) };
-    }
-    prevDiff = diff; prevX = x; prevLoad = load;
   });
-
-  return { designLoadPoints, supplementalPoints, balancePoint };
+  return { designLoadPoints, supplementalPoints };
 }
 
 /* ------------------------- Validation ------------------------- */
@@ -200,7 +202,6 @@ function validateInputs(inputs) {
       ? `${cfg.shutdownLabel} must be cooler than the ${cfg.designTempLabel}.`
       : `${cfg.shutdownLabel} must be warmer than the ${cfg.designTempLabel}.`);
   }
-
   if (worstCaseEnabled) {
     if (isNaN(worstCaseTemp)) {
       errors.push('Outdoor Worst Case Temp must be a valid number.');
@@ -232,11 +233,9 @@ function runSizingCalculation(inputs) {
   }
 
   const loadLinePoints = buildLoadLinePoints(shutdownTemp, designTemp, designLoad, worstCaseEnabled, worstCaseTemp, worstCaseLoad);
-  const { designLoadPoints, supplementalPoints, balancePoint } =
+  const { designLoadPoints, supplementalPoints } =
     buildShadedRegions(unitKey, mode, waterTemp, designLoad, shutdownTemp, designTemp, worstCaseEnabled, worstCaseTemp);
 
-  // Only meaningful when Worst Case is on — that's the only time the load
-  // line continues past the original Design Day point.
   const designDayLine = worstCaseEnabled
     ? [{ x: designTemp, y: designLoad }, { x: designTemp, y: 0 }] : null;
 
@@ -247,7 +246,7 @@ function runSizingCalculation(inputs) {
     loadLinePoints, capacityCurvePoints,
     designLoadPoints, supplementalPoints,
     designPoint: { x: designTemp, y: capacityAtDesign },
-    balancePoint, designDayLine,
+    designDayLine,
     minOperatingTemp: limits.minOperatingTemp,
     maxOperatingTemp: limits.maxOperatingTemp,
     demandLimitTemp: limits.demandLimitTemp,
@@ -256,7 +255,7 @@ function runSizingCalculation(inputs) {
   };
 }
 
-/* ------------------------- Competitors (heating only for now) ------------------------- */
+/* ------------------------- Competitors ------------------------- */
 
 function competitorsAvailable(mode) {
   return mode !== 'cooling' || COMPETITORS_HAVE_COOLING;
@@ -267,46 +266,113 @@ function getCompetitorEntry(model) {
 function getCompetitorClass(model) {
   return CAPACITY.competitorsSmall[model] ? '3-3.5 Ton' : '5-5.5 Ton';
 }
-function getCompetitorCurvePoints(model, mode) {
-  const entry = getCompetitorEntry(model);
-  if (!entry) return [];
-  const raw = (mode === 'cooling') ? (entry.coolingPoints || []) : entry.points;
-  return raw.filter(p => p.capacity !== null && p.capacity !== undefined)
-            .map(p => ({ x: p.od, y: p.capacity }))
-            .sort((a, b) => a.x - b.x);
+function allCompetitorModels() {
+  return [...Object.keys(CAPACITY.competitorsSmall), ...Object.keys(CAPACITY.competitorsLarge)];
 }
-function interpolateCompetitor(model, mode, odTemp) {
-  const pts = getCompetitorCurvePoints(model, mode);
+
+/* ---- Cooling: interpolate across published water temps ---- */
+
+function competitorCoolingWaterTemps(entry) {
+  return Object.keys(entry.cooling || {}).map(Number).sort((a, b) => a - b);
+}
+
+// Capacity at a single published water column. Returns null above the
+// hottest published OD (outside the rated range, like the Centrus), and
+// clamps flat below the coolest.
+function competitorColumnAt(entry, wt, od) {
+  const pts = (entry.cooling[String(wt)] || [])
+    .filter(p => p.capacity !== null && p.capacity !== undefined)
+    .map(p => ({ x: p.od, y: p.capacity }))
+    .sort((a, b) => a.x - b.x);
   if (pts.length === 0) return null;
-  if (odTemp <= pts[0].x) return pts[0].y;
-  if (odTemp >= pts[pts.length - 1].x) return pts[pts.length - 1].y;
-  for (let i = 0; i < pts.length - 1; i++) {
-    const a = pts[i], b = pts[i + 1];
-    if (odTemp >= a.x && odTemp <= b.x) {
-      const frac = (odTemp - a.x) / (b.x - a.x);
-      return a.y + frac * (b.y - a.y);
+  if (od > pts[pts.length - 1].x) return null;
+  return interp1D(pts, od);
+}
+
+// Picks the two published water columns that bracket waterTemp (or the two
+// nearest if it's outside the range) and interpolates/extrapolates.
+function competitorCoolingAt(entry, waterTemp, od) {
+  const wts = competitorCoolingWaterTemps(entry);
+  if (wts.length === 0) return { value: null, extrapolated: false };
+  if (wts.length === 1) return { value: competitorColumnAt(entry, wts[0], od), extrapolated: waterTemp !== wts[0] };
+
+  let lo, hi;
+  const extrapolated = waterTemp < wts[0] || waterTemp > wts[wts.length - 1];
+  const beyond = Math.max(wts[0] - waterTemp, waterTemp - wts[wts.length - 1], 0);
+  if (beyond > MAX_COOLING_WATER_EXTRAPOLATION_F) return { value: null, extrapolated: true };
+  if (waterTemp <= wts[0]) { lo = wts[0]; hi = wts[1]; }
+  else if (waterTemp >= wts[wts.length - 1]) { lo = wts[wts.length - 2]; hi = wts[wts.length - 1]; }
+  else {
+    for (let i = 0; i < wts.length - 1; i++) {
+      if (waterTemp >= wts[i] && waterTemp <= wts[i + 1]) { lo = wts[i]; hi = wts[i + 1]; break; }
     }
   }
-  return null;
+  const a = competitorColumnAt(entry, lo, od), b = competitorColumnAt(entry, hi, od);
+  if (a === null || b === null) return { value: null, extrapolated };
+  const v = a + (waterTemp - lo) / (hi - lo) * (b - a);
+  return { value: Math.max(0, v), extrapolated };
 }
-function buildCompetitorComparison(mode, designTemp, worstCaseTemp, worstCaseEnabled) {
-  if (!competitorsAvailable(mode)) return [];
-  const models = [...Object.keys(CAPACITY.competitorsSmall), ...Object.keys(CAPACITY.competitorsLarge)];
-  return models.map(model => ({
-    model,
-    displayName: getCompetitorEntry(model).displayName,
-    className: getCompetitorClass(model),
-    capDesign: interpolateCompetitor(model, mode, designTemp),
-    capWorst: worstCaseEnabled ? interpolateCompetitor(model, mode, worstCaseTemp) : null
-  }));
+
+function competitorCoolingRange(entry) {
+  const wts = competitorCoolingWaterTemps(entry);
+  return wts.length ? { min: wts[0], max: wts[wts.length - 1], temps: wts } : null;
 }
-function getAllCompetitorCurves(mode) {
+
+/* ---- Mode-aware public API ---- */
+
+function getCompetitorCurvePoints(model, mode, waterTemp) {
+  const entry = getCompetitorEntry(model);
+  if (!entry) return [];
+  if (mode === 'cooling') {
+    if (!entry.cooling) return [];
+    const ods = new Set();
+    Object.values(entry.cooling).forEach(col => col.forEach(p => ods.add(p.od)));
+    return [...ods].sort((a, b) => a - b)
+      .map(od => ({ x: od, y: competitorCoolingAt(entry, waterTemp, od).value }))
+      .filter(p => p.y !== null);
+  }
+  return entry.points
+    .filter(p => p.capacity !== null && p.capacity !== undefined)
+    .map(p => ({ x: p.od, y: p.capacity }))
+    .sort((a, b) => a.x - b.x);
+}
+
+function interpolateCompetitor(model, mode, odTemp, waterTemp) {
+  const entry = getCompetitorEntry(model);
+  if (!entry) return { value: null, extrapolated: false };
+  if (mode === 'cooling') return competitorCoolingAt(entry, waterTemp, odTemp);
+  return { value: interp1D(getCompetitorCurvePoints(model, 'heating'), odTemp), extrapolated: false };
+}
+
+function buildCompetitorComparison(mode, designTemp, worstCaseTemp, worstCaseEnabled, waterTemp) {
   if (!competitorsAvailable(mode)) return [];
-  const models = [...Object.keys(CAPACITY.competitorsSmall), ...Object.keys(CAPACITY.competitorsLarge)];
-  return models.map(model => ({
-    model,
-    displayName: getCompetitorEntry(model).displayName,
-    className: getCompetitorClass(model),
-    points: getCompetitorCurvePoints(model, mode)
-  }));
+  return allCompetitorModels().map(model => {
+    const d = interpolateCompetitor(model, mode, designTemp, waterTemp);
+    const w = worstCaseEnabled ? interpolateCompetitor(model, mode, worstCaseTemp, waterTemp) : { value: null, extrapolated: false };
+    const entry = getCompetitorEntry(model);
+    return {
+      model,
+      displayName: entry.displayName,
+      className: getCompetitorClass(model),
+      capDesign: d.value,
+      capWorst: w.value,
+      extrapolated: mode === 'cooling' && (d.extrapolated || w.extrapolated),
+      range: mode === 'cooling' ? competitorCoolingRange(entry) : null
+    };
+  });
+}
+
+function getAllCompetitorCurves(mode, waterTemp) {
+  if (!competitorsAvailable(mode)) return [];
+  return allCompetitorModels().map(model => {
+    const entry = getCompetitorEntry(model);
+    const range = mode === 'cooling' ? competitorCoolingRange(entry) : null;
+    return {
+      model,
+      displayName: entry.displayName,
+      className: getCompetitorClass(model),
+      points: getCompetitorCurvePoints(model, mode, waterTemp),
+      extrapolated: !!range && (waterTemp < range.min || waterTemp > range.max)
+    };
+  });
 }
