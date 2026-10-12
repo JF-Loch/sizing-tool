@@ -2,40 +2,21 @@
    Heat Pump Sizing Tool — UI wiring
    =========================================================================
    PER-MODE INPUT STATE
-   --------------------
-   Heating and Cooling each keep their own completely independent set of
-   inputs. Typing 10,000 BTU in Cooling does not touch the 100,000 you left
-   in Heating; changing the Cooling Lockout Temp doesn't disturb the Heater
-   Shutdown Temp; and so on.
+   Heating and Cooling each keep a completely independent set of inputs in
+   `modeState`. Switching modes banks the outgoing mode (captureState) and
+   restores the incoming one (applyState).
 
-   That lives in `modeState`, a small store holding one snapshot per mode:
+   SHARED (deliberately): Heat Pump Model, State, County.
 
-       captureState(mode)  DOM  ->  modeState[mode]
-       applyState(mode)    modeState[mode]  ->  DOM
-
-   Switching modes captures the outgoing mode first, then applies the
-   incoming one. Nothing is shared between the two snapshots.
-
-   WHAT IS *NOT* PER-MODE (deliberately)
-     - Heat Pump Model, State, and County are shared. They describe the
-       physical unit and the physical building, which don't change when you
-       flip between heating and cooling season. Changing the county updates
-       BOTH modes' design temps from that county's HDD/CDD columns.
-
-   RESET TO DEFAULTS
-     Resets only the current mode's inputs and stays on the current mode.
-     The other mode's snapshot is left untouched.
+   RESET TO DEFAULTS resets only the current mode and stays on it.
    ========================================================================= */
 
 let chartInstance = null;
 let currentMode = 'heating';
-let initialized = false;   // guards captureState() before the DOM is seeded
+let initialized = false;
 
-/* Shared (not per-mode) defaults. */
 const SHARED_DEFAULTS = { unitKey: 'centrus', state: 'Tennessee', county: 'Wilson' };
 
-/* Starting values for each mode's independent snapshot.
-   designTemp / worstCaseTemp are null = "derive from the county lookup". */
 function freshModeState(mode) {
   const cfg = modeConfig(mode);
   return {
@@ -59,12 +40,11 @@ function fmtBTU(v) {
   return Math.round(v).toLocaleString() + ' BTU/h';
 }
 
-/* ------------------------- Per-mode state capture / apply ------------------------- */
+/* ------------------------- Per-mode state ------------------------- */
 
 function captureState(mode) {
   if (!initialized) return;
   const s = modeState[mode];
-  s.conditionsMode   = s.conditionsMode; // set by setDesignConditionsMode
   s.waterTemp        = document.getElementById('deliveryWaterTemp').value;
   s.shutdownTemp     = document.getElementById('shutdownTemp').value;
   s.btuLoad          = document.getElementById('btuLoad').value;
@@ -77,7 +57,6 @@ function captureState(mode) {
 function applyState(mode) {
   const s = modeState[mode];
 
-  // Water temps must be rebuilt for this mode before we can select one.
   populateWaterTemps();
   const sel = document.getElementById('deliveryWaterTemp');
   const opts = [...sel.options].map(o => o.value);
@@ -89,18 +68,14 @@ function applyState(mode) {
   document.getElementById('worstCaseToggle').checked = s.worstCaseEnabled;
   document.getElementById('showCompetitorsToggle').checked = s.showCompetitors;
 
-  // Applies readonly/visibility rules for this mode's conditions source.
   applyDesignConditionsMode(s.conditionsMode);
 
   if (s.conditionsMode === 'region') {
-    // Region drives the temps — refill from the county for THIS mode.
     updateLookup();
   } else {
-    // Manual entry — restore exactly what the user typed for this mode.
     if (s.designTemp !== null) document.getElementById('designTempOverride').value = s.designTemp;
     if (s.worstCaseTemp !== null) document.getElementById('worstCaseTemp').value = s.worstCaseTemp;
   }
-
   toggleWorstCaseRow();
 }
 
@@ -108,13 +83,12 @@ function applyState(mode) {
 
 function setMode(mode) {
   if (mode === currentMode && initialized) return;
-  captureState(currentMode);          // bank the outgoing mode's inputs
+  captureState(currentMode);
   currentMode = mode;
-  applyModeChrome(mode);              // labels, colors, tile visibility
-  applyState(mode);                   // restore this mode's own inputs
+  applyModeChrome(mode);
+  applyState(mode);
 }
 
-// Everything cosmetic/structural that differs between modes.
 function applyModeChrome(mode) {
   const cfg = modeConfig(mode);
   const cooling = mode === 'cooling';
@@ -135,14 +109,11 @@ function applyModeChrome(mode) {
   document.getElementById('chartCardTitle').textContent =
     cooling ? 'Cooling Load vs. Capacity Curve' : 'Load vs. Capacity Curve';
 
-  // Show only the lookup tiles that actually drive the current mode —
-  // the irrelevant pair is hidden outright rather than greyed out.
   document.getElementById('tileHeatDesign').style.display = cooling ? 'none' : '';
   document.getElementById('tileLowest').style.display     = cooling ? 'none' : '';
   document.getElementById('tileCoolDesign').style.display = cooling ? '' : 'none';
   document.getElementById('tileHighest').style.display    = cooling ? '' : 'none';
 
-  // Competitor UI is heating-only until cooling data exists.
   const show = competitorsAvailable(mode);
   document.getElementById('competitorCard').style.display = show ? '' : 'none';
   document.getElementById('competitorToggleRow').style.display = show ? '' : 'none';
@@ -209,8 +180,6 @@ function updateLookup() {
   document.getElementById('lookupLowestTemp').textContent = d.estimatedLowestTemp + ' °F';
   document.getElementById('lookupHighestTemp').textContent = d.estimatedHighestTemp + ' °F';
 
-  // Only the region lookup overwrites the editable fields, and only for
-  // the mode currently on screen.
   if (modeState[currentMode].conditionsMode === 'region') {
     const cfg = modeConfig(currentMode);
     document.getElementById('designTempOverride').value = d[cfg.designTempField];
@@ -227,7 +196,6 @@ function toggleWorstCaseRow() {
 
 /* ------------------------- Design Conditions source ------------------------- */
 
-// Pure presentation — no state writes, so applyState() can reuse it.
 function applyDesignConditionsMode(source) {
   const cfg = modeConfig(currentMode);
   document.querySelectorAll('.mode-btn').forEach(b => {
@@ -242,7 +210,6 @@ function applyDesignConditionsMode(source) {
     : 'Auto-filled from county — switch to Manual Entry to type your own.';
 }
 
-// User-initiated change — records it against the current mode only.
 function setDesignConditionsMode(source) {
   modeState[currentMode].conditionsMode = source;
   applyDesignConditionsMode(source);
@@ -331,9 +298,10 @@ function renderChart(result, competitorCurves) {
   }
 
   (competitorCurves || []).forEach(c => {
+    if (!c.points.length) return;
     const color = (COMPETITOR_COLORS[c.className] || {})[c.displayName] || '#9d9d9d';
-    datasets.push({ label: `${c.displayName} (${c.className})`, data: c.points,
-      borderColor: color, backgroundColor: 'transparent', borderWidth: 2,
+    datasets.push({ label: `${c.displayName} (${c.className})${c.extrapolated ? ' *' : ''}`,
+      data: c.points, borderColor: color, backgroundColor: 'transparent', borderWidth: 2,
       borderDash: [3, 3], pointRadius: 2, fill: false, tension: 0 });
   });
 
@@ -343,8 +311,6 @@ function renderChart(result, competitorCurves) {
       responsive: true,
       interaction: { mode: 'nearest', intersect: false },
       scales: {
-        // Heating reads right-to-left (colder right, matching the workbook);
-        // cooling is the inverse so the demanding end stays on the right.
         x: { type: 'linear', reverse: !cooling,
              title: { display: true, text: 'Outdoor Temperature (°F)' } },
         y: { title: { display: true, text: 'BTU/h' }, beginAtZero: true }
@@ -382,11 +348,12 @@ function renderResults(result, wcEnabled) {
     + `(unit capacity at your selected Design Temp — this drives the ${verb} Required figure above).`;
 }
 
-function renderComparisonTable(rows, capDesign, capWorst, wcEnabled) {
+function renderComparisonTable(rows, capDesign, capWorst, wcEnabled, waterTemp) {
   const tbody = document.getElementById('comparisonTableBody');
   tbody.innerHTML = '';
   const sel = document.getElementById('unitSelect');
   const unitName = sel.options[sel.selectedIndex].textContent;
+  const cooling = currentMode === 'cooling';
 
   const own = document.createElement('tr');
   own.classList.add('centrus-row');
@@ -394,13 +361,26 @@ function renderComparisonTable(rows, capDesign, capWorst, wcEnabled) {
     + `<td class="worstcase-col">${wcEnabled ? fmtBTU(capWorst) : '—'}</td>`;
   tbody.appendChild(own);
 
+  let anyExtrap = false;
   rows.forEach(r => {
+    const star = r.extrapolated ? ' *' : '';
+    if (r.extrapolated) anyExtrap = true;
     const tr = document.createElement('tr');
     tr.innerHTML = `<td>${r.displayName}</td><td>${r.className}</td>`
-      + `<td>${fmtBTU(r.capDesign)}</td>`
-      + `<td class="worstcase-col">${wcEnabled ? fmtBTU(r.capWorst) : '—'}</td>`;
+      + `<td>${r.capDesign === null ? 'N/A' : fmtBTU(r.capDesign) + star}</td>`
+      + `<td class="worstcase-col">${!wcEnabled ? '—' : (r.capWorst === null ? 'N/A' : fmtBTU(r.capWorst) + star)}</td>`;
     tbody.appendChild(tr);
   });
+
+  const note = document.getElementById('comparisonNote');
+  if (cooling) {
+    note.textContent =
+      `Competitor capacities are interpolated to match the selected ${waterTemp}°F delivery water temp. `
+      + (anyExtrap ? '* Estimated beyond the competitor\'s published water temps. ' : '')
+      + 'N/A = the competitor can\'t supply this delivery water temp, or the outdoor temp is outside its published range.';
+  } else {
+    note.textContent = 'Capacity shown at the Outdoor Design Temp (and Worst Case Temp, if enabled), referenced at a fixed 105°F water-out rating condition.';
+  }
 }
 
 /* ------------------------- Print / export ------------------------- */
@@ -437,7 +417,7 @@ function openPrintView() {
     h2{font-size:1rem;text-transform:uppercase;letter-spacing:.03em;margin-top:28px}
     table{width:100%;border-collapse:collapse;margin-top:10px}
     td,th{padding:8px 10px;text-align:left;border-bottom:1px solid #e0e0e0}
-    th{background:#f5f5f5}.v{font-weight:700;color:${accent}}
+    .v{font-weight:700;color:${accent}}
     img{max-width:100%;margin-top:16px;border:1px solid #e0e0e0}
     .b{background:${accent};color:#fff;border:none;padding:10px 20px;border-radius:6px;font-weight:700;cursor:pointer;margin-bottom:20px}
     @media print{.b{display:none}}
@@ -467,8 +447,6 @@ function openPrintView() {
 
 /* ------------------------- Reset ------------------------- */
 
-// Resets ONLY the current mode's inputs. Stays on the current mode and
-// leaves the other mode's snapshot completely alone.
 function resetToDefaults() {
   modeState[currentMode] = freshModeState(currentMode);
   applyState(currentMode);
@@ -478,7 +456,7 @@ function resetToDefaults() {
 /* ------------------------- calculate() ------------------------- */
 
 function calculate() {
-  captureState(currentMode);   // keep this mode's snapshot current
+  captureState(currentMode);
 
   const unitKey = document.getElementById('unitSelect').value;
   const designTemp = parseFloat(document.getElementById('designTempOverride').value);
@@ -500,10 +478,10 @@ function calculate() {
   const result = runSizingCalculation(inputs);
   showLimitWarning(result, designTemp, worstCaseEnabled, worstCaseTemp);
   renderResults(result, worstCaseEnabled);
-  renderChart(result, showCompetitors ? getAllCompetitorCurves(currentMode) : null);
+  renderChart(result, showCompetitors ? getAllCompetitorCurves(currentMode, waterTemp) : null);
   renderComparisonTable(
-    buildCompetitorComparison(currentMode, designTemp, worstCaseTemp, worstCaseEnabled),
-    result.capacityAtDesign, result.capacityAtWorstCase, worstCaseEnabled);
+    buildCompetitorComparison(currentMode, designTemp, worstCaseTemp, worstCaseEnabled, waterTemp),
+    result.capacityAtDesign, result.capacityAtWorstCase, worstCaseEnabled, waterTemp);
 }
 
 /* ------------------------- init ------------------------- */
@@ -525,12 +503,9 @@ async function init() {
     btn.addEventListener('click', () => { setDesignConditionsMode(btn.dataset.mode); calculate(); });
   });
 
-  // Unit is shared, but the water-temp list is per-mode, so rebuild + restore.
   document.getElementById('unitSelect').addEventListener('change', () => {
     applyState(currentMode); calculate();
   });
-  // State/County are shared; changing them refreshes the on-screen mode's
-  // temps now, and the other mode picks up the new county when switched to.
   document.getElementById('stateSelect').addEventListener('change', () => {
     populateCounties(); calculate();
   });
